@@ -9,9 +9,8 @@ import java.nio.charset.StandardCharsets;
  */
 @ApplicationScoped
 public class RawDataBroadcaster {
-
     @Inject
-    VertxWebSocketServer wsServer;
+    SocketIOServerWrapper wsServer;
 
     public void broadcastBytes(byte[] data) {
         if (data == null) return;

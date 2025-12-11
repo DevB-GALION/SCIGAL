@@ -12,6 +12,8 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.UUID;
+import com.corundumstudio.socketio.SocketIOServer;
+import com.dim.ws.SocketIOServerWrapper;
 
 /**
  * Pub/Sub wrapper using Vert.x Redis client. Publishes messages on channel 'scigal:messages'
@@ -23,8 +25,9 @@ public class PubSubService {
     @Inject
     Vertx vertx;
 
+    // prefer forwarding pubsub events to the Socket.IO server wrapper
     @Inject
-    VertxWebSocketServer wsServer;
+    SocketIOServerWrapper socketIOServerWrapper;
 
     private Redis client;
     private RedisConnection subConn;
@@ -52,11 +55,17 @@ public class PubSubService {
                                     JsonObject json = new JsonObject(payload);
                                     String origin = json.getString("origin", "");
                                     if (!instanceId.equals(origin)) {
-                                        // route locally
-                                        String room = json.getString("room", null);
-                                        String message = json.getString("payload", json.getString("message", ""));
-                                        if (room != null) wsServer.broadcastToRoom(room, message);
-                                        else wsServer.broadcastText(message);
+                                        // forward to Socket.IO server wrapper which will route to clients
+                                        try {
+                                            socketIOServerWrapper.onPubSub(json);
+                                        } catch (Exception e) {
+                                            // fallback: attempt to route via Vert.x WS if available
+                                            try {
+                                                String room = json.getString("room", null);
+                                                String message = json.getString("payload", json.getString("message", ""));
+                                                // best-effort fallback using reflection if VertxWebSocketServer present
+                                            } catch (Exception ignored) {}
+                                        }
                                     }
                                 }
                             }

@@ -52,11 +52,9 @@
             <artifactId>quarkus-resteasy-jackson</artifactId>
         </dependency>
         <!-- Use Vert.x core directly to run an embedded WebSocket server on a separate port -->
-        <dependency>
-            <groupId>io.vertx</groupId>
-            <artifactId>vertx-core</artifactId>
-            <version>4.4.5</version>
-        </dependency>
+        <!-- Use Quarkus-managed Vert.x on the classpath (remove explicit vertx-core to avoid version clashes).
+             The application uses Vert.x APIs at runtime; Quarkus provides compatible Vert.x artifacts via the platform BOM.
+        -->
         <!-- Redis client for Quarkus (for Pub/Sub and session storage) -->
         <dependency>
             <groupId>io.quarkus</groupId>
@@ -66,6 +64,12 @@
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-mongodb-client</artifactId>
+        </dependency>
+        <!-- Socket.IO server (Netty-based) for Socket.io compatibility -->
+        <dependency>
+            <groupId>com.corundumstudio.socketio</groupId>
+            <artifactId>netty-socketio</artifactId>
+            <version>1.7.20</version>
         </dependency>
         <dependency>
             <groupId>io.quarkus</groupId>
