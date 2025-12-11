@@ -42,9 +42,30 @@
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-jdbc-postgresql</artifactId>
         </dependency>
+        <!-- H2 driver for in-memory testing (application.properties uses h2 for dev) -->
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-jdbc-h2</artifactId>
+        </dependency>
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-resteasy-jackson</artifactId>
+        </dependency>
+        <!-- Use Vert.x core directly to run an embedded WebSocket server on a separate port -->
+        <dependency>
+            <groupId>io.vertx</groupId>
+            <artifactId>vertx-core</artifactId>
+            <version>4.4.5</version>
+        </dependency>
+        <!-- Redis client for Quarkus (for Pub/Sub and session storage) -->
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-redis-client</artifactId>
+        </dependency>
+        <!-- MongoDB client for message storage (to implement message history) -->
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-mongodb-client</artifactId>
         </dependency>
         <dependency>
             <groupId>io.quarkus</groupId>

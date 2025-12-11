@@ -9,12 +9,14 @@ import jakarta.transaction.Transactional;
 
 import java.util.List;
 
-import static io.quarkus.arc.ComponentsProvider.LOG;
+import org.jboss.logging.Logger;
 
 @ApplicationScoped
 public class UserService {
     @Inject
     UserRepository userRepository;
+
+    private static final Logger LOG = Logger.getLogger(UserService.class);
 
     public List<User> findAll() {
         return userRepository.listAll();
