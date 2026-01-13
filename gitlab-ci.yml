@@ -1,0 +1,190 @@
+stages:
+  # - test
+  - build
+  - dockerize
+  - deploy
+
+# =========================
+# Variables globales
+# =========================
+variables:
+  IMAGE_TAG: $CI_COMMIT_SHORT_SHA
+  APP_NAME: api-gal
+  MAVEN_OPTS: "-Dmaven.repo.local=$CI_PROJECT_DIR/.m2/repository"
+  MAVEN_CLI_OPTS: "--batch-mode --errors --fail-at-end --show-version -DinstallAtEnd=true -DdeployAtEnd=true"
+
+  # GitLab self-hosted - Container Registry (HTTP)
+  CI_REGISTRY: 151.80.235.24:5050
+  CI_REGISTRY_IMAGE: "151.80.235.24:5050/galion/api-gal" 
+
+# Cache pour Maven
+.maven-cache: &maven-cache
+  cache:
+    key: maven-$CI_COMMIT_REF_NAME
+    paths:
+      - .m2/repository/
+
+# =========================
+# Étape 1 : Tests (commenté)
+# =========================
+# test:
+#   <<: *maven-cache
+#   stage: test
+#   image: maven:3.9.9-eclipse-temurin-17
+#   script:
+#     - echo "🧪 Exécution des tests..."
+#     - ./mvnw $MAVEN_CLI_OPTS clean test
+#   artifacts:
+#     when: always
+#     reports:
+#       junit:
+#         - target/surefire-reports/TEST-*.xml
+#     expire_in: 1 hour
+#   only:
+#     - main
+#     - dev
+#     - merge_requests
+
+# =========================
+# Étape 2 : Build Quarkus
+# =========================
+build:
+  <<: *maven-cache
+  stage: build
+  image: maven:3.9.9-eclipse-temurin-17
+  script:
+    - echo "🔧 Build de l'application Quarkus..."
+    - ./mvnw $MAVEN_CLI_OPTS clean package -DskipTests
+    - echo "✅ Build terminé"
+    - ls -la target/
+  artifacts:
+    paths:
+      - target/quarkus-app/
+    expire_in: 1 hour
+  only:
+    - main
+    - dev
+
+# =========================
+# Étape 3 : Dockerize avec Kaniko
+# =========================
+dockerize:
+  stage: dockerize
+  image:
+    name: gcr.io/kaniko-project/executor:v1.19.0-debug
+    entrypoint: [""]
+  needs:
+    - job: build
+      artifacts: true
+  before_script:
+    - echo "🐳 Build avec Kaniko (sans Docker daemon)..."
+    - mkdir -p /kaniko/.docker
+    - |
+      cat > /kaniko/.docker/config.json << EOF
+      {
+        "auths": {
+          "$CI_REGISTRY": {
+            "auth": "$(echo -n gitlab-ci-token:$CI_JOB_TOKEN | base64 -w 0)"
+          }
+        },
+        "HttpHeaders": {
+          "User-Agent": "kaniko/unspecified"
+        },
+        "credsStore": "",
+        "credHelpers": {}
+      }
+      EOF
+    - cat /kaniko/.docker/config.json
+  script:
+    - echo "🏗️ Construction de l'image Docker avec Kaniko..."
+    - /kaniko/executor
+      --context $CI_PROJECT_DIR
+      --dockerfile $CI_PROJECT_DIR/Dockerfile
+      --destination $CI_REGISTRY_IMAGE:$IMAGE_TAG
+      --destination $CI_REGISTRY_IMAGE:latest
+      --insecure
+      --skip-tls-verify
+      --build-arg QUARKUS_PACKAGE_TYPE=fast-jar
+  only:
+    - main
+    - dev
+
+# =========================
+# Étape 4 : Deploy K3s
+# =========================
+deploy:
+  stage: deploy
+  image: 
+    name : bitnami/kubectl:latest
+    entrypoint: [""]
+  needs:
+    - dockerize
+  before_script:
+    - echo "⚙️ Configuration de kubectl..."
+    - mkdir -p ~/.kube
+    - echo "🔍 Debug - Type de variable KUBECONFIG_CONTENT détecté..."
+    - ls -la "$KUBECONFIG_CONTENT" 2>/dev/null && echo "Variable de type FILE détectée" || echo "Variable de type VARIABLE détectée"
+    - |
+      if [ -f "$KUBECONFIG_CONTENT" ]; then
+        echo "📁 Copie du fichier kubeconfig..."
+        cp "$KUBECONFIG_CONTENT" ~/.kube/config
+      else
+        echo "📝 Écriture du contenu kubeconfig..."
+        cat > ~/.kube/config << EOF
+      $KUBECONFIG_CONTENT
+      EOF
+      fi
+    - chmod 600 ~/.kube/config
+    - echo "🔍 Debug - Vérification du fichier kubeconfig final..."
+    - echo "--- Taille du fichier:"
+    - wc -l ~/.kube/config
+    - echo "--- Premières lignes:"
+    - head -5 ~/.kube/config
+    - kubectl version --client
+    - kubectl cluster-info
+  script:
+    - echo "🚀 Déploiement..."
+    - echo "🔧 Création du secret registry..."
+    - kubectl delete secret gitlab-registry-secret --ignore-not-found=true
+    - kubectl create secret docker-registry gitlab-registry-secret --docker-server=$CI_REGISTRY --docker-username=gitlab-ci-token --docker-password=$CI_JOB_TOKEN
+    - echo "📦 Application des manifests..."
+    - kubectl apply -f k8s/deployment.yaml
+    - kubectl apply -f k8s/service.yaml
+    - echo "🔄 Mise à jour de l'image..."
+    - kubectl set image deployment/$APP_NAME $APP_NAME=$CI_REGISTRY_IMAGE:$IMAGE_TAG
+    - echo "⏳ Attente du rollout (2 minutes max)..."
+    - kubectl rollout status deployment/$APP_NAME --timeout=120s || true
+    - echo "🔍 Debug - État des pods..."
+    - kubectl get pods -l app=$APP_NAME -o wide
+    - echo "🔍 Debug - Événements des pods..."
+    - kubectl get events --sort-by=.metadata.creationTimestamp | tail -10
+    - echo "🔍 Debug - Description du déploiement..."
+    - kubectl describe deployment $APP_NAME
+    - echo "🔍 Debug - Logs des pods qui échouent..."
+    - kubectl get pods -l app=$APP_NAME --field-selector=status.phase!=Running -o name | xargs -r kubectl describe
+    - echo "✅ Vérification finale..."
+    - kubectl get pods -l app=$APP_NAME
+    - kubectl get svc $APP_NAME
+  only:
+    - main
+    - dev
+  when: manual
+
+# =========================
+# Build native (optionnel)
+# =========================
+build-native:
+  <<: *maven-cache
+  stage: build
+  image: quay.io/quarkus/ubi-quarkus-mandrel-builder-image:jdk-17
+  script:
+    - echo "🚀 Build native Quarkus..."
+    - ./mvnw $MAVEN_CLI_OPTS package -Dnative -DskipTests
+  artifacts:
+    paths:
+      - target/*-runner
+    expire_in: 1 hour
+  only:
+    - tags
+  when: manual
+

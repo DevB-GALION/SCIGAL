@@ -12,6 +12,8 @@ import com.corundumstudio.socketio.Configuration;
 import com.corundumstudio.socketio.SocketIOServer;
 import com.corundumstudio.socketio.SocketIOClient;
 
+import com.dim.config.WebSocketConfig;
+import com.dim.config.KubernetesPortDetector;
 import com.dim.service.MessageService;
 import com.dim.service.CallService;
 import com.dim.service.SessionService;
@@ -26,6 +28,12 @@ import io.vertx.core.json.JsonObject;
 public class SocketIOServerWrapper {
 
     private static final Logger LOG = Logger.getLogger(SocketIOServerWrapper.class);
+
+    @Inject
+    WebSocketConfig wsConfig;
+
+    @Inject
+    KubernetesPortDetector k8sDetector;
 
     @Inject
     PubSubService pubSubService;
@@ -58,12 +66,19 @@ public class SocketIOServerWrapper {
         if (server != null) {
             return; // Éviter le double démarrage
         }
-        
-        LOG.info("Starting Socket.IO server on port 9092...");
+
+        // Log infos Kubernetes si disponible
+        k8sDetector.logKubernetesInfo();
+
+        // Détection automatique du port (K8s > env > config)
+        String host = k8sDetector.detectHost().orElse(wsConfig.host());
+        int port = k8sDetector.detectWebSocketPort().orElse(wsConfig.port());
+
+        LOG.infof("Starting Socket.IO server on %s:%d...", host, port);
         try {
             Configuration config = new Configuration();
-            config.setHostname("0.0.0.0");
-            config.setPort(9092);
+            config.setHostname(host);
+            config.setPort(port);
             server = new SocketIOServer(config);
 
             // connection events
@@ -233,7 +248,7 @@ public class SocketIOServerWrapper {
             });
 
             server.start();
-            LOG.info("Socket.IO server started on port 9092");
+            LOG.infof("Socket.IO server started on %s:%d", host, port);
         } catch (Exception e) {
             LOG.error("Failed to start Socket.IO server", e);
         }

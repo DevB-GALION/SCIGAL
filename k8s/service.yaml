@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: scigal-comm
+  labels:
+    app: scigal-comm
+spec:
+  type: ClusterIP
+  selector:
+    app: scigal-comm
+  ports:
+  # Port HTTP REST API
+  - name: http
+    port: 8080
+    targetPort: 8080
+    protocol: TCP
+  # Port WebSocket Socket.IO
+  - name: websocket
+    port: 9092
+    targetPort: 9092
+    protocol: TCP
