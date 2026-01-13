@@ -14,7 +14,9 @@ import com.corundumstudio.socketio.SocketIOClient;
 
 import com.dim.service.MessageService;
 import com.dim.service.CallService;
-import com.dim.ws.PubSubService;
+import com.dim.service.SessionService;
+import com.dim.service.UserProfileService;
+import com.dim.service.RoomPersistenceService;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -34,15 +36,29 @@ public class SocketIOServerWrapper {
     @Inject
     CallService callService;
 
+    @Inject
+    SessionService sessionService;
+
+    @Inject
+    UserProfileService userProfileService;
+
+    @Inject
+    RoomPersistenceService roomPersistenceService;
+
     private SocketIOServer server;
     private final ObjectMapper mapper = new ObjectMapper();
 
     void onStart(@Observes StartupEvent ev) {
-        start();
+        // La méthode start() est déjà appelée par @PostConstruct
+        // Éviter le double démarrage
     }
 
     @PostConstruct
     void start() {
+        if (server != null) {
+            return; // Éviter le double démarrage
+        }
+        
         LOG.info("Starting Socket.IO server on port 9092...");
         try {
             Configuration config = new Configuration();
@@ -54,12 +70,45 @@ public class SocketIOServerWrapper {
             server.addConnectListener(client -> {
                 LOG.infof("Socket.IO client connected: %s", client.getSessionId());
                 try {
-                    // inform client of its session id so clients may target each other
                     client.sendEvent("connected", client.getSessionId().toString());
-                } catch (Exception ignored) {}
+                    
+                    // Récupérer userId depuis les paramètres de connexion
+                    String userId = client.getHandshakeData().getSingleUrlParam("userId");
+                    if (userId != null) {
+                        // Marquer l'utilisateur en ligne (Redis)
+                        sessionService.setUserOnline(userId);
+                        // Mettre à jour le statut en base (MongoDB)
+                        userProfileService.updateStatus(userId, "online");
+                        // Broadcast présence aux autres clients
+                        server.getBroadcastOperations().sendEvent("presence", 
+                            new JsonObject()
+                                .put("userId", userId)
+                                .put("status", "online")
+                                .encode());
+                    }
+                } catch (Exception e) {
+                    LOG.debug("Error during connect handling", e);
+                }
             });
+
             server.addDisconnectListener(client -> {
                 LOG.infof("Socket.IO client disconnected: %s", client.getSessionId());
+                try {
+                    String userId = client.getHandshakeData().getSingleUrlParam("userId");
+                    if (userId != null) {
+                        // Marquer l'utilisateur hors ligne
+                        sessionService.setUserOffline(userId);
+                        userProfileService.updateStatus(userId, "offline");
+                        // Broadcast présence aux autres clients
+                        server.getBroadcastOperations().sendEvent("presence",
+                            new JsonObject()
+                                .put("userId", userId)
+                                .put("status", "offline")
+                                .encode());
+                    }
+                } catch (Exception e) {
+                    LOG.debug("Error during disconnect handling", e);
+                }
             });
 
             // join room
@@ -67,9 +116,14 @@ public class SocketIOServerWrapper {
                 try {
                     JsonNode node = mapper.readTree(data);
                     String room = node.has("room") ? node.get("room").asText() : null;
+                    String userId = client.getHandshakeData().getSingleUrlParam("userId");
                     if (room != null) {
                         client.joinRoom(room);
                         LOG.infof("client %s joined room %s", client.getSessionId(), room);
+                        // Persister le membre dans la room (MongoDB)
+                        if (userId != null) {
+                            roomPersistenceService.addMember(room, userId);
+                        }
                     }
                 } catch (Exception e) {
                     LOG.warn("invalid join payload", e);
@@ -81,9 +135,14 @@ public class SocketIOServerWrapper {
                 try {
                     JsonNode node = mapper.readTree(data);
                     String room = node.has("room") ? node.get("room").asText() : null;
+                    String userId = client.getHandshakeData().getSingleUrlParam("userId");
                     if (room != null) {
                         client.leaveRoom(room);
                         LOG.infof("client %s left room %s", client.getSessionId(), room);
+                        // Retirer le membre de la room (MongoDB)
+                        if (userId != null) {
+                            roomPersistenceService.removeMember(room, userId);
+                        }
                     }
                 } catch (Exception e) {
                     LOG.warn("invalid leave payload", e);
@@ -120,7 +179,7 @@ public class SocketIOServerWrapper {
                 }
             });
 
-            // WebRTC signalling (offer/answer/ice). Payload must include target session id or room
+            // WebRTC signalling (offer/answer/ice)
             server.addEventListener("signal", String.class, (client, data, ackSender) -> {
                 try {
                     JsonNode node = mapper.readTree(data);
@@ -140,10 +199,9 @@ public class SocketIOServerWrapper {
                     } else if (room != null) {
                         server.getRoomOperations(room).sendEvent("signal", node.toString());
                     } else {
-                        // broadcast as fallback
                         server.getBroadcastOperations().sendEvent("signal", node.toString());
                     }
-                    // also publish to Redis so other instances can relay
+                    // also publish to Redis
                     try {
                         pubSubService.publish(new JsonObject(node.toString()));
                     } catch (Exception ex) {
@@ -154,7 +212,7 @@ public class SocketIOServerWrapper {
                 }
             });
 
-            // call metadata event (store metadata about calls)
+            // call metadata event
             server.addEventListener("call_metadata", String.class, (client, data, ackSender) -> {
                 try {
                     JsonNode node = mapper.readTree(data);
@@ -163,7 +221,7 @@ public class SocketIOServerWrapper {
                     String to = node.has("to") ? node.get("to").asText() : null;
                     // store metadata
                     callService.saveCallMetadata(callId, from, to, node);
-                    // publish to redis for cross-instance visibility
+                    // publish to redis
                     try {
                         pubSubService.publish(new JsonObject(node.toString()));
                     } catch (Exception ex) {
@@ -184,13 +242,16 @@ public class SocketIOServerWrapper {
     @PreDestroy
     void stop() {
         try {
-            if (server != null) server.stop();
-        } catch (Exception ignored) {}
+            if (server != null) {
+                server.stop();
+            }
+        } catch (Exception e) {
+            LOG.debug("Error stopping Socket.IO server", e);
+        }
     }
 
     /**
-     * Called by the PubSubService when a message arrives from Redis from another instance.
-     * Routes the JSON to the appropriate Socket.IO event (message, signal, call_metadata).
+     * Called by the PubSubService when a message arrives from Redis.
      */
     public void onPubSub(JsonObject json) {
         try {
@@ -203,7 +264,9 @@ public class SocketIOServerWrapper {
                         try {
                             java.util.UUID targetId = java.util.UUID.fromString(target);
                             SocketIOClient targetClient = server.getClient(targetId);
-                            if (targetClient != null) targetClient.sendEvent("signal", json.encode());
+                            if (targetClient != null) {
+                                targetClient.sendEvent("signal", json.encode());
+                            }
                         } catch (IllegalArgumentException ignored) {}
                     } else if (room != null) {
                         server.getRoomOperations(room).sendEvent("signal", json.encode());
@@ -212,7 +275,6 @@ public class SocketIOServerWrapper {
                     }
                     break;
                 case "call_metadata":
-                    // forward call metadata events to clients
                     String callRoom = json.getString("room", null);
                     if (callRoom != null) {
                         server.getRoomOperations(callRoom).sendEvent("call_metadata", json.encode());
@@ -257,5 +319,4 @@ public class SocketIOServerWrapper {
             LOG.debug("failed to broadcast to room to socket.io clients", e);
         }
     }
-
 }
